@@ -1,290 +1,269 @@
 import json
 import re
-from datetime import datetime, timedelta
-from urllib.parse import urlencode, urljoin
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional, Dict, Tuple
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
-HEADERS = {"User-Agent": "kent-court-tracker/1.2"}
+KENT_POLICE_SEARCH = "https://www.kent.police.uk/news/news-search/"
+CPS_NEWS_CENTRE = "https://www.cps.gov.uk/news"
 
-KENT_POLICE_BASE = "https://www.kent.police.uk"
-KENT_POLICE_SEARCH = KENT_POLICE_BASE + "/news/news-search/"
+# CPS South East is area=8 (Kent, Surrey, Sussex)
+CPS_SOUTH_EAST_AREA_ID = 8
+# CPS "Hate crime" filter is crime_type=21
+CPS_HATE_CRIME_TYPE_ID = 21
 
-LOOKBACK_YEARS = 5
-MAX_PAGES_PER_TERM = 120
-MAX_LINKS_PER_PAGE = 30
-MAX_FEED_ITEMS = 400
-MAX_SEEN_URLS = 20000
+USER_AGENT = "kent-court-tracker/1.0 (+https://github.com/)"
 
-SEARCH_TERMS = [
-    "homophobic",
-    "transphobic",
-    "biphobic",
-    "sexual orientation",
-    "gender identity",
-    "lgbt",
-    "lgbtq",
+MAX_ITEMS = 50
+MAX_PAGES_PER_SOURCE = 80
+REQUEST_TIMEOUT = 25
+
+STATE_FILE = "state.json"
+FEED_FILE = "feed.json"
+
+KENT_HINTS = [
+    "kent", "maidstone", "canterbury", "medway", "chatham", "gillingham", "rochester",
+    "ashford", "dartford", "gravesend", "tonbridge", "tunbridge", "sevenoaks",
+    "folkestone", "dover", "deal", "whitstable", "herne bay", "sittingbourne",
+    "sheerness", "isle of sheppey", "sheppey", "thanet", "margate", "ramsgate",
+    "broadstairs", "swale", "faversham", "cranbrook", "tenterden",
+    "maidstone crown court", "canterbury crown court"
 ]
 
-LGBT_CORE_TERMS = [
+STRONG_LGBT_HATE_TERMS = [
     "homophobic", "homophobia",
-    "transphobic", "transphobia",
     "biphobic", "biphobia",
-    "sexual orientation",
-    "gender identity",
-    "lgbt", "lgbtq", "lgbtqia",
+    "transphobic", "transphobia",
+]
+
+LGBT_TERMS = [
+    "lgbt", "lgbtq", "lgbtq+", "lgbtqia", "lgbtqia+",
     "gay", "lesbian", "bisexual",
     "trans", "transgender",
     "non-binary", "non binary", "nonbinary",
+    "sexual orientation", "gender identity",
 ]
 
 HATE_TERMS = [
-    "hate crime",
-    "hate-crime",
-    "hatecrime",
+    "hate crime", "hate incident", "hate-crime", "hostility", "prejudice",
 ]
 
-COURT_HINTS = [
-    "court",
-    "crown court",
-    "magistrates",
-    "jailed",
-    "sentenced",
-    "convicted",
-    "pleaded guilty",
-    "pleaded",
-    "charged",
-    "appeared",
-    "remanded",
-    "trial",
-    "hearing",
-]
-
+@dataclass
+class Item:
+    title: str
+    url: str
+    published: Optional[datetime]
+    source: str
+    summary: str
 
 def http_get(url: str) -> str:
-    r = requests.get(url, headers=HEADERS, timeout=30)
+    headers = {"User-Agent": USER_AGENT}
+    r = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     return r.text
 
-
-def load_json(path: str, fallback):
+def load_state() -> Dict:
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
+    except FileNotFoundError:
+        return {"seen_urls": []}
     except Exception:
-        return fallback
+        return {"seen_urls": []}
 
+def save_state(state: Dict) -> None:
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
-def save_json(path: str, data) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def save_feed(items: List[Item]) -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    payload = {
+        "generated_at": now.isoformat().replace("+00:00", "Z"),
+        "count": len(items),
+        "items": [
+            {
+                "title": it.title,
+                "url": it.url,
+                "published": it.published.date().isoformat() if it.published else None,
+                "source": it.source,
+                "summary": it.summary,
+            }
+            for it in items
+        ],
+    }
+    with open(FEED_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
+def normalise_space(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip()
 
-def parse_published_dt(published: str) -> datetime | None:
-    if not published:
-        return None
-    published = published.strip()
-    for fmt in ("%H:%M %d/%m/%Y", "%H:%M %d/%m/%y"):
-        try:
-            return datetime.strptime(published, fmt)
-        except ValueError:
-            continue
-    return None
-
-
-def extract_kent_police_links(query: str, page: int) -> list[str]:
-    params = {"q": query, "page": str(page), "fdte": "", "tdte": ""}
-    url = KENT_POLICE_SEARCH + "?" + urlencode(params)
-    html = http_get(url)
-    soup = BeautifulSoup(html, "html.parser")
-
-    links: set[str] = set()
-
-    for a in soup.select("h3 a"):
-        href = (a.get("href") or "").strip()
-        if href.startswith("/news/"):
-            links.add(urljoin(KENT_POLICE_BASE, href.split("?")[0]))
-
-    if not links:
-        for a in soup.find_all("a", href=True):
-            href = a["href"].strip()
-            if href.startswith("/news/") and "/latest/" in href:
-                links.add(urljoin(KENT_POLICE_BASE, href.split("?")[0]))
-
-    return sorted(list(links))[:MAX_LINKS_PER_PAGE]
-
+def is_kent_related(text_lower: str) -> bool:
+    return any(h in text_lower for h in KENT_HINTS)
 
 def is_relevant_lgbt_hate(text_lower: str) -> bool:
-    strong = [
-        "homophobic", "homophobia",
-        "transphobic", "transphobia",
-        "biphobic", "biphobia",
-        "sexual orientation",
-        "gender identity",
-    ]
-    if any(s in text_lower for s in strong):
+    if any(t in text_lower for t in STRONG_LGBT_HATE_TERMS):
         return True
+    has_lgbt = any(t in text_lower for t in LGBT_TERMS)
+    has_hate = any(t in text_lower for t in HATE_TERMS)
+    return has_lgbt and has_hate
 
-    has_hate = any(h in text_lower for h in HATE_TERMS)
-    has_lgbt = any(
-        l in text_lower
-        for l in [
-            "lgbt", "lgbtq", "lgbtqia",
-            "gay", "lesbian", "bisexual",
-            "trans", "transgender",
-            "non-binary", "non binary", "nonbinary",
-        ]
-    )
-    return has_hate and has_lgbt
+def extract_kent_police_published(block_text: str) -> Optional[datetime]:
+    # Example: "Published: 09:45 20/11/2025"
+    m = re.search(r"Published:\s*(\d{2}:\d{2})\s*(\d{2}/\d{2}/\d{4})", block_text)
+    if not m:
+        return None
+    try:
+        dt = datetime.strptime(m.group(1) + " " + m.group(2), "%H:%M %d/%m/%Y")
+        return dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
 
+def extract_cps_published(block_text: str) -> Optional[datetime]:
+    # Example: "09 August 2024"
+    m = re.search(r"\b(\d{1,2}\s+[A-Za-z]+\s+\d{4})\b", block_text)
+    if not m:
+        return None
+    try:
+        dt = datetime.strptime(m.group(1), "%d %B %Y")
+        return dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
 
-def parse_kent_police_article(url: str) -> dict | None:
+def parse_article_basic(url: str) -> Tuple[str, str]:
+    """
+    Fetch an article and return (title, summary).
+    Summary is first reasonable paragraph, or empty string.
+    """
     html = http_get(url)
     soup = BeautifulSoup(html, "html.parser")
 
     title = ""
     h1 = soup.find("h1")
     if h1:
-        title = " ".join(h1.get_text(" ", strip=True).split())
-    if not title:
-        og = soup.find("meta", property="og:title")
-        if og and og.get("content"):
-            title = og["content"].strip()
-
-    text_all = soup.get_text("\n", strip=True)
-
-    published = ""
-    m = re.search(
-        r"Published:\s*([0-9]{1,2}:[0-9]{2}\s[0-9]{2}/[0-9]{2}/[0-9]{4})",
-        text_all,
-    )
-    if m:
-        published = m.group(1)
+        title = normalise_space(h1.get_text(" ", strip=True))
 
     summary = ""
-    meta_desc = soup.find("meta", attrs={"name": "description"})
-    if meta_desc and meta_desc.get("content"):
-        summary = " ".join(meta_desc["content"].strip().split())
-    else:
-        p = soup.find("p")
-        if p:
-            summary = " ".join(p.get_text(" ", strip=True).split())
+    # Try a few common containers
+    for selector in ["main p", "article p", ".content p", ".rich-text p", "p"]:
+        p = soup.select_one(selector)
+        if not p:
+            continue
+        txt = normalise_space(p.get_text(" ", strip=True))
+        if len(txt) >= 40:
+            summary = txt
+            break
 
-    hay = (title + " " + summary + " " + text_all).lower()
+    return title, summary
 
-    if not is_relevant_lgbt_hate(hay):
-        return None
+def fetch_kent_police_items(cutoff: datetime) -> List[Item]:
+    items: List[Item] = []
+    categories = ["Policing news", "Appeals", "Most Wanted"]
 
-    court_hit = any(h in hay for h in COURT_HINTS)
+    for ct in categories:
+        for page in range(1, MAX_PAGES_PER_SOURCE + 1):
+            url = (
+                f"{KENT_POLICE_SEARCH}"
+                f"?ct={requests.utils.quote(ct)}&fdte=&tdte=&q=&page={page}"
+            )
+            html = http_get(url)
+            soup = BeautifulSoup(html, "html.parser")
 
-    label = "Police update"
-    if court_hit:
-        label = "Court update"
-    elif any(h in hay for h in HATE_TERMS):
-        label = "Hate crime update"
+            page_items = []
+            for h3 in soup.select("h3"):
+                a = h3.find("a", href=True)
+                if not a:
+                    continue
+                href = a["href"].strip()
+                title = normalise_space(a.get_text(" ", strip=True))
+                full_url = urljoin(KENT_POLICE_SEARCH, href)
 
-    tags = []
-    for k in (LGBT_CORE_TERMS + HATE_TERMS):
-        if k.lower() in hay:
-            tags.append(k)
-    tags = sorted(list(set(tags)))
+                container = h3.parent
+                container_text = normalise_space(container.get_text(" ", strip=True))
+                published = extract_kent_police_published(container_text)
 
-    found_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-    published_dt = parse_published_dt(published)
-    published_iso = published_dt.isoformat() + "Z" if published_dt else ""
-
-    return {
-        "id": url,
-        "source": "Kent Police",
-        "label": label,
-        "title": title or "Untitled",
-        "published": published,
-        "published_iso": published_iso,
-        "url": url,
-        "summary": summary[:400],
-        "tags": tags,
-        "found_at": found_at,
-    }
-
-
-def sort_key(item: dict) -> str:
-    return item.get("published_iso") or item.get("found_at") or ""
-
-
-def main() -> None:
-    cutoff = datetime.utcnow() - timedelta(days=365 * LOOKBACK_YEARS)
-
-    state = load_json("state.json", {"seen_urls": []})
-    seen = set(state.get("seen_urls", []))
-
-    feed = load_json("feed.json", [])
-    if not isinstance(feed, list):
-        feed = []
-
-    new_items: list[dict] = []
-
-    for term in SEARCH_TERMS:
-        for page in range(1, MAX_PAGES_PER_TERM + 1):
-            try:
-                links = extract_kent_police_links(term, page)
-            except Exception:
-                break
-
-            if not links:
-                break
-
-            page_oldest_dt: datetime | None = None
-            any_dt = False
-
-            for link in links:
-                if link in seen:
+                if published and published < cutoff:
                     continue
 
-                seen.add(link)
-
-                try:
-                    item = parse_kent_police_article(link)
-                except Exception:
-                    item = None
-
-                if not item:
+                # Use listing text as quick filter
+                candidate = (title + " " + container_text).lower()
+                if not is_relevant_lgbt_hate(candidate):
                     continue
 
-                dt = parse_published_dt(item.get("published", ""))
-                if dt:
-                    any_dt = True
-                    if page_oldest_dt is None or dt < page_oldest_dt:
-                        page_oldest_dt = dt
+                # Pull nicer summary from article
+                art_title, art_summary = parse_article_basic(full_url)
+                if art_title:
+                    title = art_title
 
-                    if dt < cutoff:
-                        continue
+                page_items.append(
+                    Item(
+                        title=title,
+                        url=full_url,
+                        published=published,
+                        source="Kent Police",
+                        summary=art_summary,
+                    )
+                )
 
-                new_items.append(item)
+            if not page_items:
+                # Stop if we have paged far enough that everything is older than cutoff
+                # Heuristic: if page contains dates and the newest date is older than cutoff, break
+                page_text = normalise_space(soup.get_text(" ", strip=True))
+                dates = [d for d in re.findall(r"Published:\s*\d{2}:\d{2}\s*\d{2}/\d{2}/\d{4}", page_text)]
+                if dates:
+                    parsed = [extract_kent_police_published(x) for x in dates]
+                    parsed = [p for p in parsed if p]
+                    if parsed and max(parsed) < cutoff:
+                        break
 
-            if any_dt and page_oldest_dt and page_oldest_dt < cutoff:
-                break
+            items.extend(page_items)
 
-    merged: list[dict] = []
-    seen_ids: set[str] = set()
+            if len(items) >= MAX_ITEMS:
+                return items[:MAX_ITEMS]
 
-    for it in (new_items + feed):
-        it_id = it.get("id") or it.get("url")
-        if not it_id:
-            continue
-        if it_id in seen_ids:
-            continue
-        seen_ids.add(it_id)
-        merged.append(it)
+    return items[:MAX_ITEMS]
 
-    merged.sort(key=sort_key, reverse=True)
-    merged = merged[:MAX_FEED_ITEMS]
+def fetch_cps_south_east_hatecrime_items(cutoff: datetime) -> List[Item]:
+    items: List[Item] = []
 
-    state_out = {"seen_urls": list(seen)[:MAX_SEEN_URLS]}
+    for page in range(1, MAX_PAGES_PER_SOURCE + 1):
+        url = f"{CPS_NEWS_CENTRE}?area={CPS_SOUTH_EAST_AREA_ID}&crime_type={CPS_HATE_CRIME_TYPE_ID}&page={page}"
+        html = http_get(url)
+        soup = BeautifulSoup(html, "html.parser")
 
-    save_json("feed.json", merged)
-    save_json("state.json", state_out)
+        page_blocks = []
+        for h3 in soup.select("h3"):
+            a = h3.find("a", href=True)
+            if not a:
+                continue
 
+            href = a["href"].strip()
+            title = normalise_space(a.get_text(" ", strip=True))
+            full_url = urljoin(CPS_NEWS_CENTRE, href)
 
-if __name__ == "__main__":
-    main()
+            container = h3.parent
+            container_text = normalise_space(container.get_text(" ", strip=True))
+            published = extract_cps_published(container_text)
+
+            if published and published < cutoff:
+                continue
+
+            candidate = (title + " " + container_text).lower()
+
+            # South East includes Kent, Surrey, Sussex, so filter to Kent
+            if not is_kent_related(candidate):
+                # Sometimes Kent is only in the article, so allow strong terms through to article check
+                if not any(t in candidate for t in STRONG_LGBT_HATE_TERMS):
+                    continue
+
+            if not is_relevant_lgbt_hate(candidate):
+                continue
+
+            art_title, art_summary = parse_article_basic(full_url)
+            if art_title:
+                title = art_title
+
+            # Conf
