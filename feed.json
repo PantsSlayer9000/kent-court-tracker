@@ -1,1 +1,18 @@
-[]
+[
+  {
+    "source": "CPS South East",
+    "label": "Court update",
+    "title": "Jail for man who yelled homophobic abuse at Chatham protest",
+    "url": "https://www.cps.gov.uk/south-east/news/jail-man-who-yelled-homophobic-abuse-chatham-protest",
+    "published": "2024-08-09",
+    "summary": "A man who yelled homophobic abuse at police officers during a protest in Chatham has become the first person in Kent to be jailed following the recent spate of national disorder."
+  },
+  {
+    "source": "CPS South East",
+    "label": "Court update",
+    "title": "New approach to prosecuting adult rape cases in South East leads to more cases being charged",
+    "url": "https://www.cps.gov.uk/south-east/news/new-approach-prosecuting-adult-rape-cases-south-east-leads-more-cases-being-charged",
+    "published": "2023-07-10",
+    "summary": "New figures from CPS internal data shows that the number of rape referrals made by Kent, Surrey and Sussex Police has almost trebled in the last three years."
+  }
+]
