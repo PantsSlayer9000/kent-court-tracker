@@ -30,12 +30,18 @@ KENT_TOWNS = [
     "tenterden", "cranbrook",
 ]
 
-KENT_UK_PHRASES = [
-    "kent, uk", "kent uk",
-    "kent, england", "kent england",
-    "county of kent", "kent police",
-    "maidstone crown court", "canterbury crown court",
-    "medway magistrates", "maidstone magistrates", "canterbury magistrates",
+KENT_PHRASES = [
+    "kent police",
+    "maidstone crown court",
+    "canterbury crown court",
+    "medway magistrates",
+    "maidstone magistrates",
+    "canterbury magistrates",
+    "kent, england",
+    "kent england",
+    "kent, uk",
+    "kent uk",
+    "county of kent",
 ]
 
 BLOCK_TERMS = [
@@ -49,35 +55,65 @@ BLOCK_TERMS = [
     "united states",
 ]
 
+ALLOW_SOURCE_DOMAINS = [
+    ".co.uk",
+    ".gov.uk",
+    ".police.uk",
+    ".org.uk",
+    ".ac.uk",
+]
+
+ALLOW_SOURCE_CONTAINS = [
+    "bbc.co.uk",
+    "itv.com",
+    "cps.gov.uk",
+    "kentonline.co.uk",
+    "kentlive.news",
+    "isleofthanetnews.com",
+]
+
+COURT_TERMS = [
+    "court",
+    "crown court",
+    "magistrates",
+    "sentenced",
+    "jailed",
+    "imprisoned",
+    "convicted",
+    "charged",
+    "appeared",
+    "remanded",
+    "pleaded guilty",
+    "pleaded",
+]
+
+HATE_TERMS = [
+    "hate crime",
+    "hate-crime",
+    "hatecrime",
+    "hostility",
+    "prejudice",
+]
+
 LGBT_TERMS = [
-    "homophobic", "homophobia",
-    "transphobic", "transphobia",
-    "biphobic", "biphobia",
+    "homophobic",
+    "homophobia",
+    "transphobic",
+    "transphobia",
+    "biphobic",
+    "biphobia",
     "sexual orientation",
     "gender identity",
-    "lgbt", "lgbtq", "lgbtqia",
-    "gay", "lesbian", "bisexual",
-    "transgender", "non-binary", "non binary", "nonbinary",
-]
-
-HATE_OR_CASE_TERMS = [
-    "hate crime", "hate-crime", "hatecrime",
-    "court", "crown court", "magistrates",
-    "sentenced", "jailed", "imprisoned", "convicted",
-    "charged", "appeared", "pleaded", "pleaded guilty",
-    "assault", "abuse", "attack",
-]
-
-UK_SITE_QUERIES = [
-    # Kent local
-    "site:kentonline.co.uk",
-    "site:kentlive.news",
-    "site:isleofthanetnews.com",
-    # National and official
-    "site:bbc.co.uk",
-    "site:itv.com",
-    "site:cps.gov.uk",
-    "site:gov.uk",
+    "lgbt",
+    "lgbtq",
+    "lgbtqia",
+    "gay",
+    "lesbian",
+    "bisexual",
+    "transgender",
+    "non-binary",
+    "non binary",
+    "nonbinary",
 ]
 
 def load_json(path: str, fallback):
@@ -132,58 +168,30 @@ def fetch_rss(url: str):
 def is_uk_source(source_url: str) -> bool:
     if not source_url:
         return False
-    u = source_url.lower()
-    if u.endswith(".edu") or ".edu/" in u:
-        return False
-    if u.endswith(".us") or ".us/" in u:
-        return False
-    if u.endswith(".co.uk") or ".co.uk/" in u:
+    u = source_url.lower().strip()
+    if any(u.endswith(d) or (d + "/") in u for d in ALLOW_SOURCE_DOMAINS):
         return True
-    if u.endswith(".gov.uk") or ".gov.uk/" in u:
-        return True
-    if u.endswith(".police.uk") or ".police.uk/" in u:
-        return True
-    if u.endswith(".org.uk") or ".org.uk/" in u:
-        return True
-    if u.endswith(".ac.uk") or ".ac.uk/" in u:
-        return True
-    if "bbc.co.uk" in u:
-        return True
-    if "itv.com" in u:
+    if any(x in u for x in ALLOW_SOURCE_CONTAINS):
         return True
     return False
 
 def looks_like_kent_uk(text: str) -> bool:
     t = (text or "").lower()
-
     if any(b in t for b in BLOCK_TERMS):
         return False
-
-    if any(p in t for p in KENT_UK_PHRASES):
+    if any(p in t for p in KENT_PHRASES):
         return True
-
     if any(town in t for town in KENT_TOWNS):
         return True
-
-    # Allow plain "kent" only if it also includes a UK hint
-    if "kent" in t and (" uk" in t or " england" in t or "kent police" in t):
+    if "kent" in t and (" england" in t or " uk" in t or "kent police" in t):
         return True
-
     return False
-
-def has_lgbt_signal(text: str) -> bool:
-    t = (text or "").lower()
-    return any(x in t for x in LGBT_TERMS)
-
-def has_case_signal(text: str) -> bool:
-    t = (text or "").lower()
-    return any(x in t for x in HATE_OR_CASE_TERMS)
 
 def label_item(title: str, summary: str) -> str:
     t = ((title or "") + " " + (summary or "")).lower()
-    if any(x in t for x in ["court", "crown court", "magistrates", "sentenced", "jailed", "convicted", "charged"]):
+    if any(x in t for x in COURT_TERMS):
         return "Court update"
-    if "hate crime" in t or "hate-crime" in t or "hatecrime" in t:
+    if any(x in t for x in HATE_TERMS):
         return "Hate crime update"
     return "News report"
 
@@ -235,19 +243,30 @@ def main() -> None:
     state = load_json(STATE_FILE, {"seen_urls": []})
     seen = set(state.get("seen_urls", []))
 
-    lgbt_q = '"homophobic" OR "transphobic" OR "biphobic" OR "sexual orientation" OR "gender identity" OR lgbt OR lgbtq OR gay OR lesbian OR bisexual OR transgender'
-    case_q = '"hate crime" OR court OR "crown court" OR magistrates OR sentenced OR jailed OR convicted OR charged OR appeared'
-    kent_q = '"Kent UK" OR "Kent England" OR Maidstone OR Canterbury OR Medway OR Thanet OR Ashford OR Dartford OR Gravesend OR Sevenoaks OR Dover OR Folkestone OR Sittingbourne OR Sheerness OR Sheppey OR Swale OR Faversham OR Whitstable OR "Kent Police"'
+    # Keep queries simple. More queries beats one complicated query.
+    base_negatives = '-"Kent State" -Ohio -USA -"United States" -Michigan'
 
-    queries = []
-    for site in UK_SITE_QUERIES:
-        queries.append(f'({lgbt_q}) ({case_q}) ({kent_q}) {site} -("Kent State") -Ohio -USA -("United States")')
-
-    # Add one broader UK query to catch other UK publishers
-    queries.append(f'({lgbt_q}) ({case_q}) ({kent_q}) -("Kent State") -Ohio -USA -("United States")')
+    queries = [
+        f'homophobic Kent Police {base_negatives}',
+        f'transphobic Kent Police {base_negatives}',
+        f'"hate crime" "sexual orientation" Kent {base_negatives}',
+        f'"hate crime" "gender identity" Kent {base_negatives}',
+        f'LGBT hate crime Maidstone {base_negatives}',
+        f'LGBT hate crime Canterbury {base_negatives}',
+        f'homophobic Maidstone court {base_negatives}',
+        f'transphobic Canterbury court {base_negatives}',
+        f'"sexual orientation" court Kent {base_negatives}',
+        f'"gender identity" court Kent {base_negatives}',
+        f'homophobic Kent site:kentonline.co.uk {base_negatives}',
+        f'transphobic Kent site:kentonline.co.uk {base_negatives}',
+        f'homophobic Kent site:kentlive.news {base_negatives}',
+        f'transphobic Kent site:kentlive.news {base_negatives}',
+        f'"hate crime" Kent site:bbc.co.uk {base_negatives}',
+        f'"hate crime" Kent site:itv.com {base_negatives}',
+        f'"hate crime" Kent site:cps.gov.uk {base_negatives}',
+    ]
 
     collected = []
-
     for q in queries:
         url = build_google_rss_url(q)
         xml_text = fetch_rss(url)
@@ -255,6 +274,8 @@ def main() -> None:
             continue
 
         items = rss_items(xml_text)[:MAX_ITEMS_PER_QUERY]
+        kept = 0
+
         for it in items:
             link = it.get("url")
             if not link:
@@ -264,25 +285,26 @@ def main() -> None:
             if not within_lookback(it.get("published"), cutoff):
                 continue
 
-            combined = f"{it.get('title','')} {it.get('summary','')} {it.get('source','')} {it.get('source_url','')}"
+            src_url = it.get("source_url", "")
+            if src_url and not is_uk_source(src_url):
+                continue
+
+            combined = f"{it.get('title','')} {it.get('summary','')} {it.get('source','')} {src_url}"
             if not looks_like_kent_uk(combined):
                 continue
 
-            # If summaries are short, keep it permissive, but require at least one of these
-            if not (has_lgbt_signal(combined) or "hate crime" in combined.lower()):
-                continue
-            if not has_case_signal(combined):
-                continue
-
-            # UK publisher check via source url when present
-            src_url = it.get("source_url", "")
-            if src_url and not is_uk_source(src_url):
+            # Loose LGBT signal. If the query was LGBT specific, the title may still be short.
+            t = combined.lower()
+            if not (any(x in t for x in LGBT_TERMS) or any(x in t for x in HATE_TERMS)):
                 continue
 
             it["label"] = label_item(it.get("title", ""), it.get("summary", ""))
             it["found_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
             collected.append(it)
             seen.add(link)
+            kept += 1
+
+        print("Query kept:", kept, "for:", q)
 
     dedup = {}
     for it in collected:
