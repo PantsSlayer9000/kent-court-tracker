@@ -266,4 +266,70 @@ def fetch_cps_south_east_hatecrime_items(cutoff: datetime) -> List[Item]:
             if art_title:
                 title = art_title
 
-            # Conf
+            # Confirm Kent relevance from article too, if needed
+            confirm_text = (title + " " + art_summary).lower()
+            if not is_kent_related(confirm_text):
+                continue
+
+            page_blocks.append(
+                Item(
+                    title=title,
+                    url=full_url,
+                    published=published,
+                    source="CPS South East",
+                    summary=art_summary,
+                )
+            )
+
+        items.extend(page_blocks)
+
+        # Stop paging once newest item on this page is older than cutoff
+        page_text = normalise_space(soup.get_text(" ", strip=True))
+        page_dates = re.findall(r"\b\d{1,2}\s+[A-Za-z]+\s+\d{4}\b", page_text)
+        parsed_dates = []
+        for d in page_dates:
+            try:
+                parsed_dates.append(datetime.strptime(d, "%d %B %Y").replace(tzinfo=timezone.utc))
+            except Exception:
+                pass
+        if parsed_dates and max(parsed_dates) < cutoff:
+            break
+
+        if len(items) >= MAX_ITEMS:
+            return items[:MAX_ITEMS]
+
+    return items[:MAX_ITEMS]
+
+def sort_items(items: List[Item]) -> List[Item]:
+    def key(it: Item):
+        return it.published or datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return sorted(items, key=key, reverse=True)
+
+def main() -> None:
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=365 * 5)
+
+    state = load_state()
+    seen = set(state.get("seen_urls", []))
+
+    collected: List[Item] = []
+    collected.extend(fetch_cps_south_east_hatecrime_items(cutoff))
+    collected.extend(fetch_kent_police_items(cutoff))
+
+    # De-dupe by URL
+    dedup: Dict[str, Item] = {}
+    for it in collected:
+        dedup[it.url] = it
+
+    items = sort_items(list(dedup.values()))[:MAX_ITEMS]
+
+    # Update seen URLs (kept for future use)
+    for it in items:
+        seen.add(it.url)
+    state["seen_urls"] = sorted(seen)[:5000]
+    save_state(state)
+
+    save_feed(items)
+
+if __name__ == "__main__":
+    main()
