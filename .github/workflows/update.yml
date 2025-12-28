@@ -1,12 +1,9 @@
-name: Update Kent court feed
+name: Update feeds
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "25 6 * * *"
-
-permissions:
-  contents: write
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
 
 jobs:
   build:
@@ -25,14 +22,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run tracker
+      - name: Run trackers
         run: |
           python tracker.py
+          python pink_tracker.py
 
       - name: Commit and push if changed
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add feed.json state.json
-          git diff --staged --quiet || git commit -m "Update feed"
-          git push
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add feed.json state.json pinknews.json pink_state.json
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "Update feeds"
+            git push
+          fi
